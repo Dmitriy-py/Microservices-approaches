@@ -419,8 +419,9 @@ services:
     environment:
       - discovery.type=single-node
       - xpack.security.enabled=false
-      - "ES_JAVA_OPTS=-Xms1024m -Xmx1024m"
+      - ELASTIC_PASSWORD=qwerty123456
       - ingest.geoip.downloader.enabled=false
+      - xpack.security.http.ssl.enabled=false
     ports:
       - "9200:9200"
     networks:
@@ -504,6 +505,10 @@ sinks:
     bulk:
       index: "vector-%Y-%m-%d"
     compression: none
+    auth:
+      strategy: basic
+      user: "elastic"
+      password: "qwerty123456"
 ```
 
 ## 3. nginx.conf

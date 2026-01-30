@@ -115,7 +115,6 @@
 
     java_backend_build:
       extends: .java-build-template
-      # Дополнительные настройки для этого сервиса
     ```
 
 #### 7. Возможность безопасного хранения секретных данных
@@ -134,10 +133,10 @@
       script:
         - deploy-to-prod.sh
       rules:
-        - if: '$CI_COMMIT_BRANCH == "main"' # Запуск только для ветки main
-          when: manual # Ручной запуск
+        - if: '$CI_COMMIT_BRANCH == "main"'
+          when: manual
           allow_failure: false
-        - if: '$CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+$/' # Запуск при пуше тега
+        - if: '$CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+$/'
           when: on_success
     ```
 
@@ -163,14 +162,13 @@
     ```dockerfile
     FROM alpine/git:latest
     RUN apk add --no-cache openssh-client curl jq
-    # Дополнительные инструменты
     ```
 
     Использование в `.gitlab-ci.yml`:
     ```yaml
     my_custom_build:
       stage: build
-      image: registry.example.com/my-org/custom-ci-tools:latest # Ваш собственный образ
+      image: registry.example.com/my-org/custom-ci-tools:latest
       script:
         - my-custom-tool --version
         - git clone ssh://git@some-internal-repo.com/project.git
@@ -193,7 +191,7 @@
     [[runners]]
       [runners.kubernetes]
         namespace = "gitlab-runner"
-        image = "ubuntu:20.04" # Образ по умолчанию для подов
+        image = "ubuntu:20.04"
         cpu_request = "100m"
         memory_request = "128Mi"
         cpu_limit = "500m"
@@ -218,7 +216,7 @@
       script:
         - npm install
         - npm test
-      parallel: 3 # Запуск 3 параллельных заданий, каждое со своим тестом или частью тестов (например, через test-splits)
+      parallel: 3
     ```
 
     *   **Внутри одного задания:** Тестовые фреймворки (Jest, JUnit, Pytest-xdist) могут быть настроены на распределение тестов по потокам или процессам внутри одного контейнера сборки.
@@ -393,7 +391,157 @@
 *   **Zabbix/Nagios** сложнее масштабируются в динамических средах (где контейнеры постоянно создаются и удаляются).
 *   **Prometheus** специально спроектирован для микросервисов: он лучше работает с "эфемерными" целями и обладает мощнейшим языком агрегации (PromQL), который незаменим, когда нужно видеть общую картину по десяткам инстансов одного приложения.
 
+## Задача 4: Логи * (необязательная)
 
+### Продолжить работу по задаче API Gateway: сервисы, используемые в задаче, пишут логи в stdout.
+
+### Добавить в систему сервисы для сбора логов Vector + ElasticSearch + Kibana со всех сервисов, обеспечивающих работу API.
+
+## Результат выполнения:
+
+### docker compose файл, запустив который можно перейти по адресу http://localhost:8081, по которому доступна Kibana. Логин в Kibana должен быть admin, пароль qwerty123456.
+
+## Ответ:
+
+# Решение задачи №4: Централизованное логирование (Vector + Elasticsearch + Kibana)
+
+Ниже представлены полные конфигурационные файлы и пошаговая инструкция, учитывающая все исправления (память, пути конфигов и конфликты маппинга).
+
+## 1. docker-compose.yml
+
+```yaml
+version: '3.8'
+
+services:
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:7.17.10
+    container_name: elasticsearch
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms1024m -Xmx1024m"
+      - ingest.geoip.downloader.enabled=false
+    ports:
+      - "9200:9200"
+    networks:
+      - app-net
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:7.17.10
+    container_name: kibana
+    ports:
+      - "8081:5601"
+    depends_on:
+      - elasticsearch
+    networks:
+      - app-net
+
+  vector:
+    image: timberio/vector:0.30.0-alpine
+    container_name: vector
+    volumes:
+      - ./vector/vector.yaml:/etc/vector/vector.yaml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    command: ["--config", "/etc/vector/vector.yaml"]
+    depends_on:
+      - elasticsearch
+    networks:
+      - app-net
+
+  gateway:
+    image: nginx:latest
+    container_name: gateway-gateway-1
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "80:80"
+    depends_on:
+      - security
+      - uploader
+    networks:
+      - app-net
+
+  security:
+    build: ./security
+    container_name: gateway-security-1
+    networks:
+      - app-net
+
+  uploader:
+    build: ./uploader
+    container_name: gateway-uploader-1
+    networks:
+      - app-net
+
+networks:
+  app-net:
+    driver: bridge
+```
+
+## 2. vector/vector.yaml
+
+```yaml
+sources:
+  docker_all_logs:
+    type: docker_logs
+
+transforms:
+  clean_logs:
+    type: remap
+    inputs:
+      - docker_all_logs
+    source: |
+      del(.label)
+      del(.container_labels)
+
+sinks:
+  elasticsearch_out:
+    type: elasticsearch
+    inputs:
+      - clean_logs
+    endpoint: "http://elasticsearch:9200"
+    mode: bulk
+    bulk:
+      index: "vector-%Y-%m-%d"
+    compression: none
+```
+
+## 3. nginx.conf
+
+```nginx
+events {}
+http {
+    server {
+        listen 80;
+        location /v1/token { proxy_pass http://security:5000/v1/token; }
+        location /v1/register { proxy_pass http://security:5000/v1/register; }
+        location /v1/user { proxy_pass http://security:5000/v1/user; }
+        location /v1/upload { proxy_pass http://uploader:5001/v1/upload; }
+    }
+}
+```
+
+## 4. Инструкция по запуску
+
+1. **Запуск всей инфраструктуры**:
+   ```bash
+   docker compose up -d --build --force-recreate
+   ```
+
+2. **Генерация логов (трафика)**:
+   ```bash
+   curl -X POST -H 'Content-Type: application/json' -d '{"login":"admin","password":"qwe"}' http://localhost/v1/token
+   ```
+
+3. **Проверка поступления данных в Elasticsearch**:
+   ```bash
+   curl http://localhost:9200/_cat/indices/vector-*?v
+   ```
+<img width="1920" height="1080" alt="Снимок экрана (2573)" src="https://github.com/user-attachments/assets/5080fc2a-0323-4f5b-936f-53f0aef46278" />
+
+<img width="1920" height="1080" alt="Снимок экрана (2569)" src="https://github.com/user-attachments/assets/b1520f59-d64b-4626-b725-f958cf0ac330" />
+
+<img width="1920" height="1080" alt="Снимок экрана (2571)" src="https://github.com/user-attachments/assets/59cacab6-1660-4b62-8423-4bca5990e795" />
 
 
 
